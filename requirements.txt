@@ -1,0 +1,3 @@
+pyserial
+py2app
+PyQt6
