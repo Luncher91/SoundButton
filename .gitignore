@@ -60,6 +60,10 @@ dist/SerialButtonSound.app/
 *.tmp
 *.temp
 
+# Generated macOS icon resources
+icon.iconset/
+icon.icns
+
 # macOS Finder folder settings
 Icon
 
