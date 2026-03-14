@@ -100,12 +100,22 @@ def load_config() -> dict:
     return {}
 
 
-def save_config(port: str, baud: int, trigger_map: dict | None = None) -> None:
+def save_config(
+    port: str,
+    baud: int,
+    trigger_map: dict | None = None,
+    debounce_seconds: float | None = None,
+    heartbeat_timeout: float | None = None,
+) -> None:
     """Persist the current settings to disk."""
     try:
         cfg: dict = {"port": port, "baud": baud}
         if trigger_map is not None:
             cfg["trigger_map"] = trigger_map
+        if debounce_seconds is not None:
+            cfg["debounce_seconds"] = debounce_seconds
+        if heartbeat_timeout is not None:
+            cfg["heartbeat_timeout"] = heartbeat_timeout
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open("w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
@@ -345,8 +355,14 @@ class SerialGuiApp(QtWidgets.QWidget):
 
         self.apply_config()
 
-        # Persist the chosen port/baud and current trigger map.
-        save_config(port, baud, TRIGGER_MAP)
+        # Persist the chosen port/baud, trigger map, and timing settings.
+        save_config(
+            port,
+            baud,
+            TRIGGER_MAP,
+            debounce_seconds=DEBOUNCE_SECONDS,
+            heartbeat_timeout=HEARTBEAT_TIMEOUT,
+        )
 
         _stop_event.clear()
         global _heartbeat_callback
@@ -386,19 +402,59 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    global DEBOUNCE_SECONDS, HEARTBEAT_TIMEOUT
+
     args = parse_args()
     setup_signal_handlers()
 
     if args.nogui:
-        # In CLI mode we still want to load any saved trigger map.
+        # In CLI mode we still want config to be applied (port/baud + trigger map + timings).
         cfg = load_config()
         trigger_map = cfg.get("trigger_map")
         if isinstance(trigger_map, dict):
             TRIGGER_MAP.clear()
             TRIGGER_MAP.update({str(k): v for k, v in trigger_map.items()})
 
+        # Determine port/baud (cli > config > default).
+        if args.port is not None:
+            used_port = args.port
+            port_source = "cli"
+        elif "port" in cfg and cfg.get("port"):
+            used_port = str(cfg["port"])
+            port_source = "config"
+        else:
+            used_port = DEFAULT_PORT
+            port_source = "default"
+
+        if args.baud is not None:
+            used_baud = args.baud
+            baud_source = "cli"
+        elif "baud" in cfg and cfg.get("baud") is not None:
+            used_baud = int(cfg["baud"])
+            baud_source = "config"
+        else:
+            used_baud = DEFAULT_BAUD
+            baud_source = "default"
+
+        # Load optional debounce/heartbeat settings from config.
+        if "debounce_seconds" in cfg:
+            try:
+                DEBOUNCE_SECONDS = float(cfg["debounce_seconds"])
+            except Exception:
+                pass
+        if "heartbeat_timeout" in cfg:
+            try:
+                HEARTBEAT_TIMEOUT = float(cfg["heartbeat_timeout"])
+            except Exception:
+                pass
+
+        _safe_print(
+            f"Using port={used_port} ({port_source}), "
+            f"baud={used_baud} ({baud_source})"
+        )
+
         try:
-            read_loop(args.port or DEFAULT_PORT, args.baud or DEFAULT_BAUD)
+            read_loop(used_port, used_baud)
         except Exception as exc:
             _safe_print(f"⚠️  Unhandled exception: {exc}")
             sys.exit(1)
@@ -415,7 +471,7 @@ def main() -> None:
     # Load persisted port/baud, falling back to args if nothing saved.
     cfg = load_config()
 
-    # Determine what values to use for port/baud (cli > config > default).
+    # Determine what values to use (cli > config > default).
     if args.port is not None:
         used_port = args.port
         port_source = "cli"
@@ -437,6 +493,18 @@ def main() -> None:
         used_baud = DEFAULT_BAUD
         baud_source = "default"
     window.baud_edit.setText(str(used_baud))
+
+    # Load debounce and heartbeat settings from config if present.
+    if "debounce_seconds" in cfg:
+        try:
+            DEBOUNCE_SECONDS = float(cfg["debounce_seconds"])
+        except Exception:
+            pass
+    if "heartbeat_timeout" in cfg:
+        try:
+            HEARTBEAT_TIMEOUT = float(cfg["heartbeat_timeout"])
+        except Exception:
+            pass
 
     _safe_print(
         f"Using port={used_port} ({port_source}), "
