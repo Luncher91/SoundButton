@@ -213,24 +213,24 @@ def handle_message(msg: str) -> None:
 def read_loop(port: str, baud: int) -> None:
     global _serial_thread
     try:
-        with serial.Serial(port, baud, timeout=1) as ser:
-            _safe_print(f"Listening on {port} at {baud} baud...")
-            while not _stop_event.is_set():
-                try:
-                    line = ser.readline().decode("utf-8", errors="ignore").strip()
-                    if not line:
-                        continue
+        while not _stop_event.is_set():
+            try:
+                with serial.Serial(port, baud, timeout=1) as ser:
+                    _safe_print(f"Listening on {port} at {baud} baud...")
+                    while not _stop_event.is_set():
+                        line = ser.readline().decode("utf-8", errors="ignore").strip()
+                        if not line:
+                            continue
 
-                    _safe_print(f"RX: {line}")
-                    handle_message(line)
-
-                except Exception as exc:
-                    # If we're shutting down, ignore errors and exit cleanly.
-                    if _stop_event.is_set():
-                        break
-                    # Keep listening even if a transient error occurs.
-                    _safe_print(f"Error reading serial: {exc}")
-                    time.sleep(0.5)
+                        _safe_print(f"RX: {line}")
+                        handle_message(line)
+            except Exception as exc:
+                # If we're shutting down, ignore errors and exit cleanly.
+                if _stop_event.is_set():
+                    break
+                # Keep listening even if a transient error occurs.
+                _safe_print(f"Error reading serial: {exc}, retrying in 1s...")
+                time.sleep(1)
 
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C (macOS can be noisy if this bubbles up).
@@ -320,12 +320,16 @@ class SerialGuiApp(QtWidgets.QWidget):
         now = time.monotonic()
         if self.last_heartbeat is not None and (now - self.last_heartbeat) < HEARTBEAT_TIMEOUT:
             self._set_heartbeat_color("green")
+            self.heartbeat_label.setText("HEART_BEAT received")
         else:
             self._set_heartbeat_color("red")
+            if self.last_heartbeat is None:
+                self.heartbeat_label.setText("No HEART_BEAT received yet")
+            else:
+                self.heartbeat_label.setText("HEART_BEAT timed out")
 
     def on_heartbeat(self) -> None:
         self.last_heartbeat = time.monotonic()
-        self._set_heartbeat_color("green")
 
     def apply_config(self) -> None:
         try:
@@ -376,10 +380,13 @@ class SerialGuiApp(QtWidgets.QWidget):
         self.apply_btn.setEnabled(False)
         self.status_label.setText(f"Listening on {port} @ {baud}...")
 
+        self.heartbeat_label.setText("Connecting...")
+
     def stop_serial(self) -> None:
         global _heartbeat_callback
         _stop_event.set()
         _heartbeat_callback = None
+        self.last_heartbeat = None
         if self.serial_thread:
             self.serial_thread.join(timeout=1)
         self.status_label.setText("Stopped")
