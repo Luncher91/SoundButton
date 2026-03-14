@@ -79,8 +79,16 @@ def _safe_print(*args, **kwargs):
         pass
 
 
-def load_config() -> dict[str, str | int]:
-    """Load stored settings (serial port and baud) from disk."""
+def load_config() -> dict:
+    """Load stored settings from disk.
+
+    Stored keys:
+    - port: serial port
+    - baud: baud rate
+    - trigger_map: dict mapping messages to actions
+
+    Returns an empty dict on failure.
+    """
     try:
         if CONFIG_PATH.exists():
             with CONFIG_PATH.open("r", encoding="utf-8") as f:
@@ -92,12 +100,15 @@ def load_config() -> dict[str, str | int]:
     return {}
 
 
-def save_config(port: str, baud: int) -> None:
-    """Persist the current serial port settings."""
+def save_config(port: str, baud: int, trigger_map: dict | None = None) -> None:
+    """Persist the current settings to disk."""
     try:
+        cfg: dict = {"port": port, "baud": baud}
+        if trigger_map is not None:
+            cfg["trigger_map"] = trigger_map
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open("w", encoding="utf-8") as f:
-            json.dump({"port": port, "baud": baud}, f, indent=2)
+            json.dump(cfg, f, indent=2)
     except Exception as exc:
         _safe_print(f"⚠️  Failed to save config: {exc}")
 
@@ -315,6 +326,9 @@ class SerialGuiApp(QtWidgets.QWidget):
             TRIGGER_MAP.clear()
             TRIGGER_MAP.update({str(k): v for k, v in data.items()})
             self.status_label.setText("Config applied.")
+
+            # Persist current settings including the trigger map.
+            save_config(self.port_edit.text().strip(), int(self.baud_edit.text().strip()), TRIGGER_MAP)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Invalid Trigger Map", f"Failed to parse trigger map: {exc}")
 
@@ -330,7 +344,9 @@ class SerialGuiApp(QtWidgets.QWidget):
             return
 
         self.apply_config()
-        save_config(port, baud)
+
+        # Persist the chosen port/baud and current trigger map.
+        save_config(port, baud, TRIGGER_MAP)
 
         _stop_event.clear()
         global _heartbeat_callback
@@ -374,8 +390,15 @@ def main() -> None:
     setup_signal_handlers()
 
     if args.nogui:
+        # In CLI mode we still want to load any saved trigger map.
+        cfg = load_config()
+        trigger_map = cfg.get("trigger_map")
+        if isinstance(trigger_map, dict):
+            TRIGGER_MAP.clear()
+            TRIGGER_MAP.update({str(k): v for k, v in trigger_map.items()})
+
         try:
-            read_loop(args.port, args.baud)
+            read_loop(args.port or DEFAULT_PORT, args.baud or DEFAULT_BAUD)
         except Exception as exc:
             _safe_print(f"⚠️  Unhandled exception: {exc}")
             sys.exit(1)
