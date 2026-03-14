@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 try:
@@ -36,6 +37,9 @@ import serial
 
 DEFAULT_PORT = "/dev/cu.usbserial-0001"  # change for your system (e.g. COM3 on Windows)
 DEFAULT_BAUD = 115200
+
+# Config persistence
+CONFIG_PATH = Path.home() / ".soundbutton_config.json"
 
 # Map incoming serial messages to actions.
 # The value can be:
@@ -73,6 +77,29 @@ def _safe_print(*args, **kwargs):
         print(*args, **kwargs)
     except Exception:
         pass
+
+
+def load_config() -> dict[str, str | int]:
+    """Load stored settings (serial port and baud) from disk."""
+    try:
+        if CONFIG_PATH.exists():
+            with CONFIG_PATH.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_config(port: str, baud: int) -> None:
+    """Persist the current serial port settings."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with CONFIG_PATH.open("w", encoding="utf-8") as f:
+            json.dump({"port": port, "baud": baud}, f, indent=2)
+    except Exception as exc:
+        _safe_print(f"⚠️  Failed to save config: {exc}")
 
 
 def play_wav(path: str) -> None:
@@ -303,6 +330,8 @@ class SerialGuiApp(QtWidgets.QWidget):
             return
 
         self.apply_config()
+        save_config(port, baud)
+
         _stop_event.clear()
         global _heartbeat_callback
         _heartbeat_callback = self.on_heartbeat
@@ -333,8 +362,9 @@ class SerialGuiApp(QtWidgets.QWidget):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serial -> sound trigger")
-    parser.add_argument("--port", default=DEFAULT_PORT, help="Serial port (e.g. /dev/ttyUSB0 or COM3)")
-    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="Baud rate")
+    # Use None defaults so we can detect whether the user explicitly provided a value.
+    parser.add_argument("--port", default=None, help="Serial port (e.g. /dev/ttyUSB0 or COM3)")
+    parser.add_argument("--baud", type=int, default=None, help="Baud rate")
     parser.add_argument("--nogui", action="store_true", help="Run in CLI mode instead of GUI")
     return parser.parse_args()
 
@@ -358,9 +388,37 @@ def main() -> None:
 
     qt_app = QtWidgets.QApplication(sys.argv)
     window = SerialGuiApp()
-    # Pre-populate GUI based on args.
-    window.port_edit.setText(args.port)
-    window.baud_edit.setText(str(args.baud))
+
+    # Load persisted port/baud, falling back to args if nothing saved.
+    cfg = load_config()
+
+    # Determine what values to use for port/baud (cli > config > default).
+    if args.port is not None:
+        used_port = args.port
+        port_source = "cli"
+    elif "port" in cfg and cfg.get("port"):
+        used_port = str(cfg["port"])
+        port_source = "config"
+    else:
+        used_port = DEFAULT_PORT
+        port_source = "default"
+    window.port_edit.setText(used_port)
+
+    if args.baud is not None:
+        used_baud = args.baud
+        baud_source = "cli"
+    elif "baud" in cfg and cfg.get("baud") is not None:
+        used_baud = int(cfg["baud"])
+        baud_source = "config"
+    else:
+        used_baud = DEFAULT_BAUD
+        baud_source = "default"
+    window.baud_edit.setText(str(used_baud))
+
+    _safe_print(
+        f"Using port={used_port} ({port_source}), "
+        f"baud={used_baud} ({baud_source})"
+    )
 
     # Open the serial port immediately on start.
     window.show()
