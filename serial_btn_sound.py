@@ -40,10 +40,12 @@ DEFAULT_BAUD = 115200
 
 # Config persistence
 CONFIG_PATH = Path.home() / ".soundbutton_config.json"
+SOUNDS_DIR = Path.home() / ".soundbutton" / "sounds"
+SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Map incoming serial messages to actions.
 # The value can be:
-# - A string ending with ".wav" -> play that WAV file.
+# - A string ending with an audio extension (e.g. ".wav", ".mp3") or absolute path -> play that audio file.
 # - The special token "tput" -> run `tput bel` (terminal bell).
 # - A callable (message) -> custom behaviour (advanced).
 TRIGGER_MAP = {
@@ -56,6 +58,7 @@ BUILTIN_ACTION_CHOICES = [
     ("Air horn", "air_horn.wav"),
     ("Terminal bell", "tput"),
     ("Read text", "say"),
+    ("Custom Audio", "custom"),
 ]
 
 # Debounce configuration: ignore repeated triggers within this interval (seconds)
@@ -212,7 +215,7 @@ def handle_message(msg: str) -> None:
     if action is None:
         return
 
-    if isinstance(action, str) and action.lower().endswith(".wav"):
+    if isinstance(action, str) and Path(action).is_absolute() and Path(action).exists():
         _run_async(play_wav, action)
     elif action == "tput":
         _run_async(play_tput_bell)
@@ -361,7 +364,39 @@ class SerialGuiApp(QtWidgets.QWidget):
         self.last_heartbeat = time.monotonic()
 
     def _on_action_changed(self, row: dict[str, QtWidgets.QWidget]) -> None:
-        row["text_edit"].setEnabled(row["action_combo"].currentData() == "say")
+        action = row["action_combo"].currentData()
+        if action == "say":
+            row["text_edit"].setPlaceholderText("Text to read aloud")
+            row["text_edit"].setReadOnly(False)
+            row["text_edit"].setEnabled(True)
+        elif action == "custom":
+            row["text_edit"].setPlaceholderText("Path to audio file")
+            row["text_edit"].setReadOnly(True)
+            row["text_edit"].setEnabled(False)
+        else:
+            row["text_edit"].setPlaceholderText("")
+            row["text_edit"].setReadOnly(False)
+            row["text_edit"].setEnabled(False)
+        if "browse_btn" in row:
+            row["browse_btn"].setVisible(action == "custom")
+
+    def _browse_sound_file(self, row: dict[str, QtWidgets.QWidget]) -> None:
+        file_dialog = QtWidgets.QFileDialog(self)
+        file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+        file_dialog.setNameFilter("Audio files (*.wav *.mp3 *.aac *.m4a *.aiff *.caf *.aif)")
+        if file_dialog.exec():
+            selected_files = file_dialog.selectedFiles()
+            if selected_files:
+                source_path = Path(selected_files[0])
+                # Copy to sounds dir with original name
+                dest_path = SOUNDS_DIR / source_path.name
+                try:
+                    import shutil
+                    shutil.copy2(source_path, dest_path)
+                    row["text_edit"].setText(str(dest_path))
+                    self._on_mapping_changed()
+                except Exception as exc:
+                    QtWidgets.QMessageBox.warning(self, "Error", f"Failed to copy file: {exc}")
 
     def _clear_mapping_rows(self) -> None:
         while self.mapping_rows:
@@ -371,7 +406,7 @@ class SerialGuiApp(QtWidgets.QWidget):
         if row not in self.mapping_rows:
             return
         self.mapping_rows.remove(row)
-        for widget_key in ("trigger_edit", "action_combo", "text_edit", "remove_btn"):
+        for widget_key in ("trigger_edit", "action_combo", "text_edit", "browse_btn", "remove_btn"):
             widget = row.get(widget_key)
             if widget is not None:
                 widget.hide()
@@ -399,8 +434,19 @@ class SerialGuiApp(QtWidgets.QWidget):
         action_combo.setCurrentIndex(index)
 
         text_edit = QtWidgets.QLineEdit(text)
-        text_edit.setPlaceholderText("Text to read aloud")
+        if action == "say":
+            text_edit.setPlaceholderText("Text to read aloud")
+        elif action == "custom":
+            text_edit.setPlaceholderText("Path to audio file")
+            text_edit.setReadOnly(True)
+        else:
+            text_edit.setPlaceholderText("")
         text_edit.setEnabled(action == "say")
+
+        browse_btn = QtWidgets.QPushButton("Browse...")
+        browse_btn.setFixedWidth(80)
+        browse_btn.setVisible(action == "custom")
+        browse_btn.clicked.connect(lambda: self._browse_sound_file(row))
 
         remove_btn = QtWidgets.QPushButton("Remove")
         remove_btn.setFixedWidth(90)
@@ -408,6 +454,7 @@ class SerialGuiApp(QtWidgets.QWidget):
         row_layout.addWidget(trigger_edit, 1)
         row_layout.addWidget(action_combo)
         row_layout.addWidget(text_edit, 2)
+        row_layout.addWidget(browse_btn)
         row_layout.addWidget(remove_btn)
 
         self.mapping_layout.addLayout(row_layout)
@@ -417,6 +464,7 @@ class SerialGuiApp(QtWidgets.QWidget):
             "trigger_edit": trigger_edit,
             "action_combo": action_combo,
             "text_edit": text_edit,
+            "browse_btn": browse_btn,
             "remove_btn": remove_btn,
         }
         self.mapping_rows.append(row)
@@ -436,6 +484,9 @@ class SerialGuiApp(QtWidgets.QWidget):
             if isinstance(action, str) and action.startswith("say:"):
                 text = action[len("say:"):]
                 action_value = "say"
+            elif isinstance(action, str) and Path(action).is_absolute():
+                text = action
+                action_value = "custom"
             self.add_mapping_row(trigger=str(trigger), action=str(action_value), text=text)
         if not self.mapping_rows:
             self.add_mapping_row()
@@ -452,6 +503,11 @@ class SerialGuiApp(QtWidgets.QWidget):
                 if not text:
                     continue
                 new_map[trigger] = f"say:{text}"
+            elif action_value == "custom":
+                path = row["text_edit"].text().strip()
+                if not path:
+                    continue
+                new_map[trigger] = path
             else:
                 new_map[trigger] = action_value
         return new_map
