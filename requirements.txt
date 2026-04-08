@@ -1,5 +1,5 @@
 pyserial
-py2app
-PyQt6
+PyInstaller
+PySide6
 Pillow
 cairosvg

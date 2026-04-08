@@ -24,7 +24,7 @@ OPTIONS = {
     # Use a custom icon (icon.icns) for the app bundle.
     "iconfile": "icon.icns",
     # Make sure pyserial + Qt are included; py2app can sometimes miss them without explicit packages.
-    "packages": ["serial", "PyQt6"],
+    "packages": ["serial", "PySide6"],
     "resources": DATA_FILES,
 }
 

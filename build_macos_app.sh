@@ -9,7 +9,7 @@ cd "$SCRIPT_DIR"
 
 # Create (or reuse) a venv so builds are reproducible.
 if [ ! -d ".venv" ]; then
-  python -m venv .venv
+  python3 -m venv .venv
 fi
 
 # shellcheck source=/dev/null
@@ -53,6 +53,6 @@ if os.system(f"iconutil -c icns {iconset_dir} -o icon.icns") != 0:
 PY
 fi
 
-python setup.py py2app
+pyinstaller --clean --noconfirm serial_btn_sound.spec
 
 echo "\n✅ Built macOS app at: $PWD/dist/SerialButtonSound.app"

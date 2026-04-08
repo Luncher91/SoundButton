@@ -9,7 +9,7 @@ Usage:
 
 Requirements:
   pip install -r requirements.txt
-  (includes pyserial, py2app, PyQt6)
+  (includes pyserial, py2app, PySide6)
 
 If you want to play a WAV file, put it next to this script and update the mapping.
 """
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 try:
-    from PyQt6 import QtCore, QtGui, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 except ImportError as exc:
     QtWidgets = None
     _pyqt_import_error = exc
@@ -51,6 +51,12 @@ TRIGGER_MAP = {
     # "BTN2": "click.wav",
     # "BTN3": "alert.wav",
 }
+
+BUILTIN_ACTION_CHOICES = [
+    ("Air horn", "air_horn.wav"),
+    ("Terminal bell", "tput"),
+    ("Read text", "say"),
+]
 
 # Debounce configuration: ignore repeated triggers within this interval (seconds)
 DEBOUNCE_SECONDS = 3.0
@@ -135,15 +141,21 @@ def play_wav(path: str) -> None:
 def play_tput_bell() -> None:
     """Play a bell sound via terminal (tput bel) or fallback to ASCII BEL."""
     try:
-        # Use a non-blocking subprocess so the serial loop isn't stalled.
         subprocess.Popen(["say", "-v", "Bells", "dong dong dong"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
-        # Fall back to ASCII BEL if the platform does not support `say`.
         try:
             print("\a", end="", flush=True)
         except Exception:
             pass
         _safe_print(f"⚠️  bell failed: {exc}")
+
+
+def play_say_text(text: str) -> None:
+    """Read text aloud using the macOS `say` command."""
+    try:
+        subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        _safe_print(f"⚠️  Failed to speak text '{text}': {exc}")
 
 
 def _run_async(func, *args, **kwargs):
@@ -204,6 +216,8 @@ def handle_message(msg: str) -> None:
         _run_async(play_wav, action)
     elif action == "tput":
         _run_async(play_tput_bell)
+    elif isinstance(action, str) and action.startswith("say:"):
+        _run_async(play_say_text, action[len("say:"):])
     elif callable(action):
         _run_async(action, msg)
     else:
@@ -275,18 +289,27 @@ class SerialGuiApp(QtWidgets.QWidget):
         self.heartbeat_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.heartbeat_label.setMinimumHeight(26)
 
-        trigger_label = QtWidgets.QLabel("Trigger map (JSON):")
-        self.trigger_edit = QtWidgets.QTextEdit()
-        self.trigger_edit.setPlainText(json.dumps(TRIGGER_MAP, indent=2))
+        trigger_label = QtWidgets.QLabel("Trigger mappings:")
+        self.mapping_rows: list[dict[str, QtWidgets.QWidget]] = []
+        self.mapping_layout = QtWidgets.QVBoxLayout()
+        self.mapping_layout.setSpacing(8)
+        self.mapping_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.apply_btn = QtWidgets.QPushButton("Apply config")
+        mapping_frame = QtWidgets.QFrame()
+        mapping_frame.setLayout(self.mapping_layout)
+        mapping_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+
+        self.add_mapping_btn = QtWidgets.QPushButton("Add mapping")
+        self.add_mapping_btn.clicked.connect(lambda: self.add_mapping_row())
+
         self.start_btn = QtWidgets.QPushButton("Start")
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.stop_btn.setEnabled(False)
 
         self.status_label = QtWidgets.QLabel("Stopped")
 
-        self.apply_btn.clicked.connect(self.apply_config)
+        self.port_edit.textChanged.connect(self._on_serial_settings_changed)
+        self.baud_edit.textChanged.connect(self._on_serial_settings_changed)
         self.start_btn.clicked.connect(self.start_serial)
         self.stop_btn.clicked.connect(self.stop_serial)
 
@@ -297,8 +320,12 @@ class SerialGuiApp(QtWidgets.QWidget):
         top_layout.addWidget(baud_label)
         top_layout.addWidget(self.baud_edit, 0)
 
+        mapping_header_layout = QtWidgets.QHBoxLayout()
+        mapping_header_layout.addWidget(trigger_label)
+        mapping_header_layout.addStretch()
+        mapping_header_layout.addWidget(self.add_mapping_btn)
+
         button_layout = QtWidgets.QHBoxLayout()
-        button_layout.addWidget(self.apply_btn)
         button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.stop_btn)
         button_layout.addStretch()
@@ -306,10 +333,12 @@ class SerialGuiApp(QtWidgets.QWidget):
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.addLayout(top_layout)
         main_layout.addWidget(self.heartbeat_label)
-        main_layout.addWidget(trigger_label)
-        main_layout.addWidget(self.trigger_edit, 1)
+        main_layout.addLayout(mapping_header_layout)
+        main_layout.addWidget(mapping_frame, 1)
         main_layout.addLayout(button_layout)
         main_layout.addWidget(self.status_label)
+
+        self.add_mapping_row()
 
     def _set_heartbeat_color(self, color: str) -> None:
         palette = self.heartbeat_label.palette()
@@ -331,20 +360,124 @@ class SerialGuiApp(QtWidgets.QWidget):
     def on_heartbeat(self) -> None:
         self.last_heartbeat = time.monotonic()
 
-    def apply_config(self) -> None:
-        try:
-            data = json.loads(self.trigger_edit.toPlainText())
-            if not isinstance(data, dict):
-                raise ValueError("Trigger map must be a JSON object")
-            # Update global trigger map in-place for thread safety.
-            TRIGGER_MAP.clear()
-            TRIGGER_MAP.update({str(k): v for k, v in data.items()})
-            self.status_label.setText("Config applied.")
+    def _on_action_changed(self, row: dict[str, QtWidgets.QWidget]) -> None:
+        row["text_edit"].setEnabled(row["action_combo"].currentData() == "say")
 
-            # Persist current settings including the trigger map.
-            save_config(self.port_edit.text().strip(), int(self.baud_edit.text().strip()), TRIGGER_MAP)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Invalid Trigger Map", f"Failed to parse trigger map: {exc}")
+    def _clear_mapping_rows(self) -> None:
+        while self.mapping_rows:
+            self._remove_mapping_row(self.mapping_rows[0], keep_one=False)
+
+    def _remove_mapping_row(self, row: dict[str, QtWidgets.QWidget], keep_one: bool = True) -> None:
+        if row not in self.mapping_rows:
+            return
+        self.mapping_rows.remove(row)
+        for widget_key in ("trigger_edit", "action_combo", "text_edit", "remove_btn"):
+            widget = row.get(widget_key)
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        while row["layout"].count():
+            item = row["layout"].takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.mapping_layout.removeItem(row["layout"])
+        if keep_one and not self.mapping_rows:
+            self.add_mapping_row()
+
+    def add_mapping_row(self, trigger: str = "", action: str = "tput", text: str = "") -> None:
+        row_layout = QtWidgets.QHBoxLayout()
+        row_layout.setSpacing(8)
+
+        trigger_edit = QtWidgets.QLineEdit(trigger)
+        trigger_edit.setPlaceholderText("Message (e.g. BTN1)")
+        trigger_edit.setMinimumWidth(100)
+
+        action_combo = QtWidgets.QComboBox()
+        for label, value in BUILTIN_ACTION_CHOICES:
+            action_combo.addItem(label, value)
+        index = next((i for i in range(action_combo.count()) if action_combo.itemData(i) == action), 0)
+        action_combo.setCurrentIndex(index)
+
+        text_edit = QtWidgets.QLineEdit(text)
+        text_edit.setPlaceholderText("Text to read aloud")
+        text_edit.setEnabled(action == "say")
+
+        remove_btn = QtWidgets.QPushButton("Remove")
+        remove_btn.setFixedWidth(90)
+
+        row_layout.addWidget(trigger_edit, 1)
+        row_layout.addWidget(action_combo)
+        row_layout.addWidget(text_edit, 2)
+        row_layout.addWidget(remove_btn)
+
+        self.mapping_layout.addLayout(row_layout)
+
+        row: dict[str, QtWidgets.QWidget] = {
+            "layout": row_layout,
+            "trigger_edit": trigger_edit,
+            "action_combo": action_combo,
+            "text_edit": text_edit,
+            "remove_btn": remove_btn,
+        }
+        self.mapping_rows.append(row)
+
+        trigger_edit.textChanged.connect(lambda _: self._on_mapping_changed())
+        action_combo.currentIndexChanged.connect(lambda _: (self._on_action_changed(row), self._on_mapping_changed()))
+        text_edit.textChanged.connect(lambda _: self._on_mapping_changed())
+        remove_btn.clicked.connect(lambda _: (self._remove_mapping_row(row), self._on_mapping_changed()))
+
+    def load_trigger_map(self, trigger_map: dict | None = None) -> None:
+        if trigger_map is None:
+            trigger_map = TRIGGER_MAP
+        self._clear_mapping_rows()
+        for trigger, action in trigger_map.items():
+            text = ""
+            action_value = action
+            if isinstance(action, str) and action.startswith("say:"):
+                text = action[len("say:"):]
+                action_value = "say"
+            self.add_mapping_row(trigger=str(trigger), action=str(action_value), text=text)
+        if not self.mapping_rows:
+            self.add_mapping_row()
+
+    def _build_trigger_map_from_rows(self) -> dict[str, str]:
+        new_map: dict[str, str] = {}
+        for row in self.mapping_rows:
+            trigger = row["trigger_edit"].text().strip()
+            if not trigger:
+                continue
+            action_value = row["action_combo"].currentData()
+            if action_value == "say":
+                text = row["text_edit"].text().strip()
+                if not text:
+                    continue
+                new_map[trigger] = f"say:{text}"
+            else:
+                new_map[trigger] = action_value
+        return new_map
+
+    def _save_current_config(self) -> None:
+        try:
+            port = self.port_edit.text().strip()
+            baud = int(self.baud_edit.text().strip())
+            save_config(port, baud, TRIGGER_MAP)
+        except Exception:
+            pass
+
+    def _on_mapping_changed(self) -> None:
+        new_map = self._build_trigger_map_from_rows()
+        TRIGGER_MAP.clear()
+        TRIGGER_MAP.update(new_map)
+        self.status_label.setText("Mappings updated.")
+        self._save_current_config()
+
+    def _on_serial_settings_changed(self) -> None:
+        try:
+            int(self.baud_edit.text().strip())
+            self.status_label.setText("Serial settings updated.")
+            self._save_current_config()
+        except ValueError:
+            self.status_label.setText("Enter a valid baud rate.")
 
     def start_serial(self) -> None:
         if self.serial_thread and self.serial_thread.is_alive():
@@ -357,7 +490,7 @@ class SerialGuiApp(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Invalid serial settings", str(exc))
             return
 
-        self.apply_config()
+        self._on_mapping_changed()
 
         # Persist the chosen port/baud, trigger map, and timing settings.
         save_config(
@@ -377,7 +510,6 @@ class SerialGuiApp(QtWidgets.QWidget):
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.apply_btn.setEnabled(False)
         self.status_label.setText(f"Listening on {port} @ {baud}...")
 
         self.heartbeat_label.setText("Connecting...")
@@ -392,7 +524,6 @@ class SerialGuiApp(QtWidgets.QWidget):
         self.status_label.setText("Stopped")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.apply_btn.setEnabled(True)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.stop_serial()
@@ -468,8 +599,8 @@ def main() -> None:
         return
 
     if QtWidgets is None:
-        _safe_print("\n⚠️  PyQt6 is not available in this Python interpreter.")
-        _safe_print("Please install it via 'pip install PyQt6' and rerun this script.")
+        _safe_print("\n⚠️  PySide6 is not available in this Python interpreter.")
+        _safe_print("Please install it via 'pip install PySide6' and rerun this script.")
         sys.exit(1)
 
     qt_app = QtWidgets.QApplication(sys.argv)
@@ -500,6 +631,12 @@ def main() -> None:
         used_baud = DEFAULT_BAUD
         baud_source = "default"
     window.baud_edit.setText(str(used_baud))
+
+    trigger_map = cfg.get("trigger_map")
+    if isinstance(trigger_map, dict):
+        TRIGGER_MAP.clear()
+        TRIGGER_MAP.update({str(k): v for k, v in trigger_map.items()})
+    window.load_trigger_map(trigger_map if isinstance(trigger_map, dict) else TRIGGER_MAP)
 
     # Load debounce and heartbeat settings from config if present.
     if "debounce_seconds" in cfg:
