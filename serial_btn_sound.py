@@ -156,11 +156,49 @@ def play_tput_bell() -> None:
 
 
 def play_say_text(text: str) -> None:
-    """Read text aloud using the macOS `say` command (blocking)."""
+    """Read text aloud using the macOS `say` command (blocking).
+    
+    Uses cached audio file if available, otherwise generates and caches it.
+    """
+    # Create cache directory in user's app data
+    cache_dir = Path.home() / ".serial_btn_sound" / "say_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create a safe filename from the text
+    safe_name = "".join(c if c.isalnum() else "_" for c in text[:50])
+    cache_file = cache_dir / f"{safe_name}.wav"
+    
+    # Generate cached audio if it doesn't exist
+    if not cache_file.exists():
+        try:
+            # Generate AIFF first, then convert to WAV
+            aiff_file = cache_file.with_suffix(".aiff")
+            subprocess.run(
+                ["say", "-o", str(aiff_file), text],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+            # Convert AIFF to WAV
+            subprocess.run(
+                ["afconvert", "-f", "WAVE", "-d", "LEI16@44100", str(aiff_file), str(cache_file)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+            # Clean up AIFF
+            aiff_file.unlink(missing_ok=True)
+        except Exception as exc:
+            _safe_print(f"⚠️  Failed to cache speech for '{text}': {exc}")
+            # Fall back to direct say
+            try:
+                subprocess.run(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception as e:
+                _safe_print(f"⚠️  Failed to speak text '{text}': {e}")
+                return
+    
+    # Play the cached WAV file
     try:
-        subprocess.run(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["afplay", str(cache_file)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
-        _safe_print(f"⚠️  Failed to speak text '{text}': {exc}")
+        _safe_print(f"⚠️  Failed to play cached speech '{text}': {exc}")
 
 
 def _run_async(func, *args, **kwargs):
