@@ -45,13 +45,16 @@ SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Map incoming serial messages to actions.
 # The value can be:
+# - A string (single action) -> play that action
+# - A list of strings (multiple actions) -> play each in order
+# Supported action types:
 # - A string ending with an audio extension (e.g. ".wav", ".mp3") or absolute path -> play that audio file.
 # - The special token "tput" -> run `tput bel` (terminal bell).
 # - A callable (message) -> custom behaviour (advanced).
 TRIGGER_MAP = {
-    "BTN1": "air_horn.wav",
-    # "BTN2": "click.wav",
-    # "BTN3": "alert.wav",
+    "BTN1": ["air_horn.wav"],
+    # "BTN2": ["click.wav"],
+    # "BTN3": ["alert.wav"],
 }
 
 BUILTIN_ACTION_CHOICES = [
@@ -62,7 +65,7 @@ BUILTIN_ACTION_CHOICES = [
 ]
 
 # Debounce configuration: ignore repeated triggers within this interval (seconds)
-DEBOUNCE_SECONDS = 3.0
+DEBOUNCE_SECONDS = 1.0
 # Track the last time each message was handled.
 _last_triggered_at: dict[str, float] = {}
 
@@ -133,18 +136,17 @@ def save_config(
 
 
 def play_wav(path: str) -> None:
-    """Play a WAV file using macOS afplay."""
+    """Play a WAV file using macOS afplay (blocking)."""
     try:
-        # afplay is non-blocking when launched via Popen.
-        subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
         _safe_print(f"⚠️  Failed to play WAV '{path}': {exc}")
 
 
 def play_tput_bell() -> None:
-    """Play a bell sound via terminal (tput bel) or fallback to ASCII BEL."""
+    """Play a bell sound via terminal (blocking)."""
     try:
-        subprocess.Popen(["say", "-v", "Bells", "dong dong dong"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["say", "-v", "Bells", "dong dong dong"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
         try:
             print("\a", end="", flush=True)
@@ -154,9 +156,9 @@ def play_tput_bell() -> None:
 
 
 def play_say_text(text: str) -> None:
-    """Read text aloud using the macOS `say` command."""
+    """Read text aloud using the macOS `say` command (blocking)."""
     try:
-        subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
         _safe_print(f"⚠️  Failed to speak text '{text}': {exc}")
 
@@ -215,16 +217,56 @@ def handle_message(msg: str) -> None:
     if action is None:
         return
 
-    if isinstance(action, str) and Path(action).is_absolute() and Path(action).exists():
-        _run_async(play_wav, action)
-    elif action == "tput":
-        _run_async(play_tput_bell)
-    elif isinstance(action, str) and action.startswith("say:"):
-        _run_async(play_say_text, action[len("say:"):])
+    # Support both single action (string) and multiple actions (list)
+    actions = [action] if isinstance(action, str) else action
+    if not isinstance(actions, list):
+        _safe_print(f"⚠️  Invalid action type for '{msg}': {type(action)}")
+        return
+
+    # Play each action in sequence (in a background thread so serial loop isn't blocked)
+    def _play_actions_sequential(actions: list, msg: str):
+        for single_action in actions:
+            _handle_single_action_sync(single_action, msg)
+    
+    _run_async(_play_actions_sequential, actions, msg)
+
+
+def _handle_single_action_sync(action: str, msg: str) -> None:
+    """Handle a single action string synchronously (blocks until complete)."""
+    # Check for special actions first (tput, say:)
+    if action == "tput":
+        play_tput_bell()
+    elif action.startswith("say:"):
+        play_say_text(action[len("say:"):])
     elif callable(action):
-        _run_async(action, msg)
+        try:
+            action(msg)
+        except Exception as exc:
+            _safe_print(f"⚠️  Custom action error: {exc}")
     else:
-        _safe_print(f"⚠️  Unsupported action for '{msg}': {action}")
+        # Treat as audio file path
+        action_path = Path(action)
+        file_path = None
+        if action_path.is_absolute() and action_path.exists():
+            file_path = action
+        elif not action_path.is_absolute():
+            # Check current directory first
+            if action_path.exists():
+                file_path = str(action_path)
+            # Then check sounds directory
+            else:
+                sounds_path = SOUNDS_DIR / action_path
+                if sounds_path.exists():
+                    file_path = str(sounds_path)
+        
+        if file_path:
+            # Play synchronously and wait for it to finish
+            try:
+                subprocess.run(["afplay", file_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as exc:
+                _safe_print(f"⚠️  Failed to play WAV '{file_path}': {exc}")
+        else:
+            _safe_print(f"⚠️  Audio file not found: {action}")
 
 
 def read_loop(port: str, baud: int) -> None:
@@ -426,6 +468,7 @@ class SerialGuiApp(QtWidgets.QWidget):
         trigger_edit = QtWidgets.QLineEdit(trigger)
         trigger_edit.setPlaceholderText("Message (e.g. BTN1)")
         trigger_edit.setMinimumWidth(100)
+        trigger_edit.setText(trigger)
 
         action_combo = QtWidgets.QComboBox()
         for label, value in BUILTIN_ACTION_CHOICES:
@@ -479,37 +522,52 @@ class SerialGuiApp(QtWidgets.QWidget):
             trigger_map = TRIGGER_MAP
         self._clear_mapping_rows()
         for trigger, action in trigger_map.items():
-            text = ""
-            action_value = action
-            if isinstance(action, str) and action.startswith("say:"):
-                text = action[len("say:"):]
-                action_value = "say"
-            elif isinstance(action, str) and Path(action).is_absolute():
-                text = action
-                action_value = "custom"
-            self.add_mapping_row(trigger=str(trigger), action=str(action_value), text=text)
+            # Handle both single action (string) and multiple actions (list)
+            actions = [action] if isinstance(action, str) else action
+            if not isinstance(actions, list):
+                continue
+            for single_action in actions:
+                text = ""
+                action_value = single_action
+                if isinstance(single_action, str) and single_action.startswith("say:"):
+                    text = single_action[len("say:"):]
+                    action_value = "say"
+                elif isinstance(single_action, str) and Path(single_action).is_absolute():
+                    text = single_action
+                    action_value = "custom"
+                self.add_mapping_row(trigger=str(trigger), action=str(action_value), text=text)
         if not self.mapping_rows:
             self.add_mapping_row()
 
-    def _build_trigger_map_from_rows(self) -> dict[str, str]:
-        new_map: dict[str, str] = {}
+    def _build_trigger_map_from_rows(self) -> dict[str, list]:
+        # Group rows by trigger, preserving order
+        trigger_to_rows: dict[str, list] = {}
         for row in self.mapping_rows:
             trigger = row["trigger_edit"].text().strip()
             if not trigger:
                 continue
-            action_value = row["action_combo"].currentData()
-            if action_value == "say":
-                text = row["text_edit"].text().strip()
-                if not text:
-                    continue
-                new_map[trigger] = f"say:{text}"
-            elif action_value == "custom":
-                path = row["text_edit"].text().strip()
-                if not path:
-                    continue
-                new_map[trigger] = path
-            else:
-                new_map[trigger] = action_value
+            if trigger not in trigger_to_rows:
+                trigger_to_rows[trigger] = []
+            trigger_to_rows[trigger].append(row)
+
+        # Build trigger map with lists of actions
+        new_map: dict[str, list] = {}
+        for trigger, rows in trigger_to_rows.items():
+            actions = []
+            for row in rows:
+                action_value = row["action_combo"].currentData()
+                if action_value == "say":
+                    text = row["text_edit"].text().strip()
+                    if text:
+                        actions.append(f"say:{text}")
+                elif action_value == "custom":
+                    path = row["text_edit"].text().strip()
+                    if path:
+                        actions.append(path)
+                else:
+                    actions.append(action_value)
+            if actions:
+                new_map[trigger] = actions
         return new_map
 
     def _save_current_config(self) -> None:

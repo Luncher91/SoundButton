@@ -1,40 +1,49 @@
 #include <Arduino.h>
 #include <Button.h>
 
-#define BTN01_PIN GPIO_NUM_02
-#define BTN02_PIN GPIO_NUM_03
-#define BTN03_PIN GPIO_NUM_04
-#define BTN04_PIN GPIO_NUM_05
-#define BTN05_PIN GPIO_NUM_13
-#define BTN06_PIN GPIO_NUM_15
-#define BTN07_PIN GPIO_NUM_16
-#define BTN08_PIN GPIO_NUM_17
-#define BTN09_PIN GPIO_NUM_18
-#define BTN10_PIN GPIO_NUM_19
-#define BTN11_PIN GPIO_NUM_21
-#define BTN12_PIN GPIO_NUM_22
-#define BTN13_PIN GPIO_NUM_23
-#define BTN14_PIN GPIO_NUM_25
-#define BTN15_PIN GPIO_NUM_26
-#define BTN16_PIN GPIO_NUM_27
-#define BTN17_PIN GPIO_NUM_32
-#define BTN18_PIN GPIO_NUM_33
+const gpio_num_t btn_pins[] {
+  // right
+  GPIO_NUM_2,
+  GPIO_NUM_4,
+  GPIO_NUM_16,
+  GPIO_NUM_17,
+  GPIO_NUM_5,
+  GPIO_NUM_18,
+//  GPIO_NUM_19,
+//  GPIO_NUM_21,
+//  GPIO_NUM_22,
+//  GPIO_NUM_23,
+  // left
+  GPIO_NUM_13,
+  GPIO_NUM_14,
+  GPIO_NUM_27,
+  GPIO_NUM_26,
+  GPIO_NUM_25,
+  GPIO_NUM_33
+};
 
-Button * btn1;
+Button * btn[18];
+int btnCmd[18];
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
 
-  btn1 = new Button(BTN01_PIN, true);
-  btn1->attachPressDownEventCb(&btn1Pd, NULL);
+  size_t array_length = sizeof(btn_pins) / sizeof(btn_pins[0]);
+  for(int i = 0; i < array_length; i++){
+    btn[i] = new Button(btn_pins[i], true);
+    btnCmd[i] = i + 1;
+    btn[i]->attachPressDownEventCb(&btnPd, &btnCmd[i]);
+  }
   
   Serial.println("");
   Serial.println("Hello from ButtonArray");
 }
 
-static void btn1Pd(void *button_handle, void *usr_data) {
-  Serial.println("BTN1");
+static void btnPd(void *button_handle, void *usr_data) {
+  Serial.print("BTN");
+  int nr = (int)(*(int*)usr_data);
+  Serial.println(nr);
 }
 
 void loop() {
